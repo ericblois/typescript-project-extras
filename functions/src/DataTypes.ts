@@ -29,12 +29,13 @@ export type OrderData = {
   cartItems: CartItem[],
   subtotalPrice: number,
   totalPrice: number,
+  shippingInfo: ShippingInfo,
   deliveryMethod: "pickup" | "local" | "country" | "international",
   deliveryPrice: number,
   creationTime: string,
   responseTime: string | null,
   completionTime: string | null,
-  status: "pending" | "accepted" | "rejected" | "shipped" | "completed"
+  status: "pending" | "accepted" | "rejected" | "completed" | "received"
 }
 
 export type UserData = {

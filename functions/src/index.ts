@@ -1,6 +1,6 @@
 import * as admin from "firebase-admin"
 import * as functions from "firebase-functions";
-import { OrderData, CartItem, PrivateBusinessData, ProductData, ShippingInfo, } from "./DataTypes";
+import { OrderData, CartItem, PrivateBusinessData, ProductData, ShippingInfo, UserData, DefaultPrivateBusinessData, DefaultPublicBusinessData, PublicBusinessData, } from "./DataTypes";
 
 admin.initializeApp();
 
@@ -15,6 +15,18 @@ const firestore = admin.firestore()
 //   functions.logger.info("Hello logs!", {structuredData: true});
 //   response.send("Hello from Firebase!");
 // });
+
+const getUserData = async (userID: string) => {
+    try {
+        const userDocSnap = await firestore.doc(`userData/${userID}`).get()
+        if (!userDocSnap.exists) {
+            throw new functions.https.HttpsError("not-found", `Could not find user ID: ${userID}`)
+        }
+        return userDocSnap.data() as UserData
+    } catch (e) {
+        throw e
+    }
+}
 
 const generateOrderID = () => {
     const now = new Date()
@@ -88,6 +100,106 @@ const getCartPrice = async (cartItems: CartItem[]) => {
         throw e
     }
 }
+
+export const createNewBusiness = functions.https.onCall(async (_, context) => {
+    try {
+        if (context.auth) {
+            // Get user's data
+            const userData = await getUserData(context.auth.uid)
+            const userID = context.auth.uid
+            // Create a new document for the private data
+            const privateColPath = `/privateBusinessData/${userData.country}/businesses`
+            const privateColRef = firestore.collection(privateColPath)
+            const privateDocRef = privateColRef.doc()
+            const businessID = privateDocRef.id
+            // Create initial private business data
+            let privateBusinessData: PrivateBusinessData = {...DefaultPrivateBusinessData, ...{
+                userID: userID,
+                businessID: businessID,
+                country: userData.country
+            }}
+            // Create initial public data
+            let publicBusinessData: PublicBusinessData = {...DefaultPublicBusinessData, ...{
+                userID: userID,
+                businessID: businessID,
+                country: userData.country
+            }}
+            // Create a new document for the public data
+            const publicColPath = `/publicBusinessData/${userData.country}/businesses")`
+            const publicColRef = firestore.collection(publicColPath)
+            const publicDocRef = publicColRef.doc(businessID)
+            // Get new business ID's
+            let newBusinessIDs = userData.businessIDs
+            newBusinessIDs.push(businessID)
+            const userDocRef = firestore.doc(`userData/${userID}`)
+            await firestore.runTransaction(async (transaction) => {
+                // Create private and public data docs
+                transaction.set(privateDocRef, privateBusinessData)
+                transaction.set(publicDocRef, publicBusinessData)
+                // Update user's business ID's
+                transaction.update(userDocRef, {businessIDs: newBusinessIDs})
+            })
+            return businessID
+        }
+        throw new functions.https.HttpsError("permission-denied", "This user is not authorized to make this action")
+    } catch(e) {
+        throw e;
+    }
+})
+
+export const deleteBusiness = functions.https.onCall(async (data: {businessID: string}, context) => {
+    try {
+        if (context.auth) {
+            // Get user's data
+            const userData = await getUserData(context.auth.uid)
+            const userID = context.auth.uid
+            // Get private data
+            const privateDocRef = firestore.doc(`/privateBusinessData/${userData.country}/businesses/${data.businessID}`)
+            const privateDocSnap = await privateDocRef.get()
+            if (!privateDocSnap.exists) {
+                throw new functions.https.HttpsError("not-found", `Could not find business ID: ${data.businessID}`)
+            }
+            // Get public data
+            const publicDocRef = firestore.doc(`/publicBusinessData/${userData.country}/businesses/${data.businessID}`)
+            const publicDocSnap = await publicDocRef.get()
+            if (!publicDocSnap.exists) {
+                throw new functions.https.HttpsError("not-found", `Could not find business ID: ${data.businessID}`)
+            }
+            // Check auth of each business doc
+            const privateData = privateDocSnap.data() as PrivateBusinessData
+            if (privateData.userID !== context.auth.uid) {
+                throw new functions.https.HttpsError("permission-denied", `This user is not authorized to make this action`)
+            }
+            const publicData = publicDocSnap.data() as PublicBusinessData
+            if (publicData.userID !== context.auth.uid) {
+                throw new functions.https.HttpsError("permission-denied", `This user is not authorized to make this action`)
+            }
+            // Get new business ID's
+            let newBusinessIDs = userData.businessIDs
+            const businessIndex = newBusinessIDs.findIndex((id) => {
+                return data.businessID === id
+            })
+            if (businessIndex < 0) {
+                throw new functions.https.HttpsError("not-found", `Could not find business ID: ${data.businessID}`)
+            }
+            newBusinessIDs.splice(businessIndex, 1)
+            // Get user doc ref
+            const userDocRef = firestore.doc(`userData/${userID}`)
+            await firestore.runTransaction(async (transaction) => {
+                // Create private and public data docs
+                transaction.delete(privateDocRef)
+                transaction.delete(publicDocRef)
+                // Update user's business ID's
+                transaction.update(userDocRef, {businessIDs: newBusinessIDs})
+            })
+            return data.businessID
+        }
+        throw new functions.https.HttpsError("permission-denied", "This user is not authorized to make this action")
+    } catch(e) {
+        throw e;
+    }
+})
+
 // Called by a customer to place an order
 export const createOrder = functions.https.onCall(async (orderInfo: {
         businessID: string,
@@ -111,6 +223,7 @@ export const createOrder = functions.https.onCall(async (orderInfo: {
                 cartItems: orderInfo.cartItems,
                 subtotalPrice: orderPrice,
                 totalPrice: orderPrice * 1.13,
+                shippingInfo: orderInfo.shippingInfo,
                 deliveryMethod: orderInfo.deliveryMethod,
                 deliveryPrice: orderInfo.deliveryPrice,
                 creationTime: dateString,
@@ -119,8 +232,8 @@ export const createOrder = functions.https.onCall(async (orderInfo: {
                 status: "pending"
             }
             // Get paths to customer and business orders
-            const customerOrderPath = `userData/${context.auth}/orders/${orderID}`
-            const businessOrderPath = `privateBusinessData/${orderInfo.businessID}/orders/${orderID}`
+            const customerOrderPath = `userData/${context.auth.uid}/orders/${orderID}`
+            const businessOrderPath = `privateBusinessData/canada/businesses/${orderInfo.businessID}/orders/${orderID}`
             await firestore.runTransaction(async (transaction) => {
                 // Create order documents
                 transaction.set(firestore.doc(customerOrderPath), orderData)
@@ -178,7 +291,6 @@ export const respondToOrder = functions.https.onCall(async (orderInfo: {
 export const completeOrder = functions.https.onCall(async (orderInfo: {
     businessID: string,
     orderID: string,
-    shipped: boolean
 }, context) => {
     try {
         if (context.auth) {
@@ -204,7 +316,7 @@ export const completeOrder = functions.https.onCall(async (orderInfo: {
             const customerOrderPath = `userData/${orderDoc.userID}/orders/${orderInfo.orderID}`
             const customerOrderDocRef = firestore.doc(customerOrderPath)
             // Update order doc
-            orderDoc.status = orderInfo.shipped ? "shipped" : "completed"
+            orderDoc.status = "completed"
             const today = new Date()
             const dateString = today.toUTCString()
             orderDoc.completionTime = dateString
